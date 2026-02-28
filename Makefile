@@ -35,6 +35,8 @@ NAMESPACE_MINIO_OPERATOR ?= "minio-operator"
 MINIO_VERSION ?= "6.0.4"
 # NAMESPACE for druid app e2e
 NAMESPACE_DRUID ?= "druid"
+# Set to false to skip the Apache RAT license audit
+ENABLE_RAT ?= true
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.26.0
@@ -102,6 +104,22 @@ test: manifests generate fmt vet envtest ## Run tests.
 .PHONY: e2e
 e2e: ## Runs e2e tests
 	e2e/e2e.sh
+
+ifeq ($(ENABLE_RAT),true)
+.PHONY: rat
+rat: rat-jar ## Run Apache RAT license audit (set ENABLE_RAT=false to skip).
+	java -jar $(RAT_JAR) \
+	  --input-exclude-std GIT \
+	  --input-exclude "**/*.png" \
+	  --input-exclude "**/*.sum" \
+	  --input-exclude "**/zz_generated.*.go" \
+	  --input-exclude "**/PROJECT" \
+	  -- .
+else
+.PHONY: rat
+rat: ## Run Apache RAT license audit (set ENABLE_RAT=false to skip).
+	@echo "Skipping Apache RAT license audit (ENABLE_RAT=false)"
+endif
 
 .PHONY: docker-build-local-test
 docker-build-local-test: ## Build docker image with the manager for test on kind.
@@ -247,11 +265,13 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 GEN_CRD_API_REFERENCE_DOCS = $(LOCALBIN)/gen-crd-api-reference-docs
 ENVTEST ?= $(LOCALBIN)/setup-envtest
+RAT_JAR ?= $(LOCALBIN)/apache-rat.jar
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v3.8.7
 CONTROLLER_TOOLS_VERSION ?= v0.14.0
 GEN_CRD_API_REF_VERSION ?= v0.3.0
+RAT_VERSION ?= 0.17
 
 KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
 .PHONY: kustomize
@@ -278,3 +298,13 @@ $(ENVTEST): $(LOCALBIN)
 gen-crd-api-reference-docs: $(GEN_CRD_API_REFERENCE_DOCS)
 $(GEN_CRD_API_REFERENCE_DOCS): $(LOCALBIN)
 	GOBIN=$(LOCALBIN) go install github.com/ahmetb/gen-crd-api-reference-docs@$(GEN_CRD_API_REF_VERSION)
+
+.PHONY: rat-jar
+rat-jar: $(RAT_JAR) ## Download Apache RAT jar locally if necessary.
+$(RAT_JAR): $(LOCALBIN)
+	mkdir -p /tmp/rat-download && \
+	curl -sSL "https://dlcdn.apache.org/creadur/apache-rat-$(RAT_VERSION)/apache-rat-$(RAT_VERSION)-bin.tar.gz" \
+	  -o /tmp/rat-download/rat.tar.gz && \
+	tar -xzf /tmp/rat-download/rat.tar.gz -C /tmp/rat-download && \
+	mv /tmp/rat-download/apache-rat-$(RAT_VERSION)/apache-rat-$(RAT_VERSION).jar $(RAT_JAR) && \
+	rm -rf /tmp/rat-download
