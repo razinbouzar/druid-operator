@@ -129,6 +129,10 @@ docker-build-local-test: ## Build docker image with the manager for test on kind
 docker-push-local-test: ## Push docker image with the manager to kind registry.
 	docker push ${IMG_KIND}:${TEST_IMG_TAG}
 
+.PHONY: kind-load-local-test
+kind-load-local-test: ## Load test docker image into kind cluster directly (no registry mirror needed).
+	kind load docker-image ${IMG_KIND}:${TEST_IMG_TAG}
+
 .PHONY: deploy-testjob
 deploy-testjob: ## Run a wikipedia test pod
 	kubectl create job wiki-test --image=${IMG_KIND}:${TEST_IMG_TAG}  -- sh /wikipedia-test.sh
@@ -193,6 +197,10 @@ docker-build-local: ## Build docker image with the manager for kind registry.
 .PHONY: docker-push-local
 docker-push-local: ## Push docker image with the manager to kind registry.
 	docker push ${IMG_KIND}:${IMG_TAG}
+
+.PHONY: kind-load-local
+kind-load-local: ## Load docker image into kind cluster directly (no registry mirror needed).
+	kind load docker-image ${IMG_KIND}:${IMG_TAG}
 
 # PLATFORMS defines the target platforms for  the manager image be build to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -269,7 +277,7 @@ RAT_JAR ?= $(LOCALBIN)/apache-rat.jar
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v3.8.7
-CONTROLLER_TOOLS_VERSION ?= v0.14.0
+CONTROLLER_TOOLS_VERSION ?= v0.20.1
 GEN_CRD_API_REF_VERSION ?= v0.3.0
 RAT_VERSION ?= 0.17
 

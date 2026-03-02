@@ -20,7 +20,8 @@
 set -o errexit
 set -x
 # Get Kind
-go install sigs.k8s.io/kind@v0.21.0
+go install sigs.k8s.io/kind@v0.31.0
+export PATH="$(go env GOPATH)/bin:$PATH"
 # minio statefulset name
 MINIO_STS_NAME=myminio-minio
 # druid namespace
@@ -33,12 +34,14 @@ make vet
 make kind
 # build local docker druid operator image
 make docker-build-local
-# push to kind registry
+# push to kind registry and load directly into kind cluster
 make docker-push-local
+make kind-load-local
 # build local docker test image
 make docker-build-local-test
-# push to kind registry
+# push to kind registry and load directly into kind cluster
 make docker-push-local-test
+make kind-load-local-test
 # try to install the CRD with make
 make install
 # install druid-operator
