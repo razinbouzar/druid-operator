@@ -20,10 +20,11 @@ package druid
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/record"
 
 	"github.com/go-logr/logr"
@@ -70,14 +71,16 @@ func NewDruidReconciler(mgr ctrl.Manager) *DruidReconciler {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 
-func (r *DruidReconciler) Reconcile(ctx context.Context, request reconcile.Request) (ctrl.Result, error) {
+func (r *DruidReconciler) Reconcile(ctx context.Context, request reconcile.Request) (result ctrl.Result, err error) {
 	_ = r.Log.WithValues("druid", request.NamespacedName)
 
 	// Fetch the Druid instance
 	instance := &druidv1alpha1.Druid{}
-	err := r.Get(ctx, request.NamespacedName, instance)
+	err = r.Get(ctx, request.NamespacedName, instance)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
+			defaultDeploymentLifecycleMetrics.deleteCluster(request.Namespace, request.Name)
+			defaultDruidRolloutMetrics.deleteCluster(request.Namespace, request.Name)
 			// Request object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
 			// Return and don't requeue
@@ -87,16 +90,48 @@ func (r *DruidReconciler) Reconcile(ctx context.Context, request reconcile.Reque
 		return ctrl.Result{}, err
 	}
 
+	defer func() {
+		if metricsErr := defaultDruidRolloutMetrics.sync(ctx, r.Client, instance); metricsErr != nil {
+			r.Log.Error(metricsErr, "failed to sync rollout metrics", "name", instance.Name, "namespace", instance.Namespace)
+		}
+	}()
+
 	// Initialize Emit Events
 	var emitEvent EventEmitter = EmitEventFuncs{r.Recorder}
 
+	if err := ensureDeploymentLifecycleStarted(ctx, r.Client, instance, emitEvent); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	runLifecycleStep := func(step func() error) error {
+		if err := step(); err != nil {
+			if shouldPersistDeploymentLifecycleFailure(err) {
+				if patchErr := markDeploymentLifecycleFailed(ctx, r.Client, instance, emitEvent, err); patchErr != nil {
+					return errors.Join(err, patchErr)
+				}
+			}
+			return err
+		}
+		return nil
+	}
+
 	// Deploy Druid Cluster
-	if err := deployDruidCluster(ctx, r.Client, instance, emitEvent); err != nil {
+	if err := runLifecycleStep(func() error {
+		return deployDruidCluster(ctx, r.Client, instance, emitEvent)
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Update Druid Dynamic Configs
-	if err := updateDruidDynamicConfigs(ctx, r.Client, instance, emitEvent); err != nil {
+	if err := runLifecycleStep(func() error {
+		return updateDruidDynamicConfigs(ctx, r.Client, instance, emitEvent)
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := runLifecycleStep(func() error {
+		return reconcileDeploymentLifecycle(ctx, r.Client, instance, emitEvent)
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 

@@ -20,15 +20,22 @@ package druidapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"path"
+	"sort"
+	"strings"
+	"time"
 
 	internalhttp "github.com/apache/druid-operator/pkg/http"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -36,6 +43,60 @@ const (
 	OperatorUserName = "OperatorUserName"
 	OperatorPassword = "OperatorPassword"
 )
+
+type BuildRevisionLookupPendingReason string
+
+const (
+	BuildRevisionPendingQueryServiceDiscovery BuildRevisionLookupPendingReason = "QueryServiceDiscovery"
+	BuildRevisionPendingQueryEndpoint         BuildRevisionLookupPendingReason = "QueryEndpoint"
+	BuildRevisionPendingQueryResponse         BuildRevisionLookupPendingReason = "QueryResponse"
+)
+
+type buildRevisionLookupDependencies struct {
+	resolveQueryServiceURL func(context.Context, string, string, client.Client) (string, error)
+	newHTTPClient          func(*internalhttp.Auth) internalhttp.DruidHTTP
+}
+
+var logger = logf.Log.WithName("druidapi")
+
+func defaultBuildRevisionLookupDependencies() buildRevisionLookupDependencies {
+	return buildRevisionLookupDependencies{
+		resolveQueryServiceURL: GetBrokerSvcUrl,
+		newHTTPClient: func(auth *internalhttp.Auth) internalhttp.DruidHTTP {
+			return internalhttp.NewHTTPClient(&http.Client{Timeout: 30 * time.Second}, auth)
+		},
+	}
+}
+
+type BuildRevisionLookupPendingError struct {
+	Reason BuildRevisionLookupPendingReason
+	Err    error
+}
+
+func (e *BuildRevisionLookupPendingError) Error() string {
+	message := "waiting for Druid build revision verification"
+	switch e.Reason {
+	case BuildRevisionPendingQueryServiceDiscovery:
+		message = "waiting for Druid query service discovery"
+	case BuildRevisionPendingQueryEndpoint:
+		message = "waiting for Druid build revision query endpoint"
+	case BuildRevisionPendingQueryResponse:
+		message = "waiting for Druid build revision query response"
+	}
+	if e.Err == nil {
+		return message
+	}
+	return fmt.Sprintf("%s: %v", message, e.Err)
+}
+
+func (e *BuildRevisionLookupPendingError) Unwrap() error {
+	return e.Err
+}
+
+func IsBuildRevisionLookupPending(err error) bool {
+	var pendingErr *BuildRevisionLookupPendingError
+	return errors.As(err, &pendingErr)
+}
 
 type AuthType string
 
@@ -57,16 +118,6 @@ type Auth struct {
 }
 
 // GetAuthCreds retrieves basic authentication credentials from a Kubernetes secret.
-// If the Auth object is empty, it returns an empty BasicAuth object.
-// Parameters:
-//
-//	ctx: The context object.
-//	c: The Kubernetes client.
-//	auth: The Auth object containing the secret reference.
-//
-// Returns:
-//
-//	BasicAuth: The basic authentication credentials, or an error if authentication retrieval fails.
 func GetAuthCreds(
 	ctx context.Context,
 	c client.Client,
@@ -112,22 +163,11 @@ func GetAuthCreds(
 	return internalhttp.BasicAuth{}, nil
 }
 
-// MakePath constructs the appropriate path for the specified Druid API.
-// Parameters:
-//
-//	baseURL: The base URL of the Druid cluster. For example, http://router-svc.namespace.svc.cluster.local:8088.
-//	componentType: The type of Druid component. For example, "indexer".
-//	apiType: The type of Druid API. For example, "worker".
-//	additionalPaths: Additional path components to be appended to the URL.
-//
-// Returns:
-//
-//	string: The constructed path.
-func MakePath(baseURL, componentType, apiType string, additionalPaths ...string) string {
+// MakePath builds a Druid API path from the supplied base URL and path components.
+func MakePath(baseURL, componentType, apiType string, additionalPaths ...string) (string, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
-		fmt.Println("Error parsing URL:", err)
-		return ""
+		return "", fmt.Errorf("parse Druid base URL %q: %w", baseURL, err)
 	}
 
 	// Construct the initial path
@@ -138,42 +178,209 @@ func MakePath(baseURL, componentType, apiType string, additionalPaths ...string)
 		u.Path = path.Join(u.Path, p)
 	}
 
-	return u.String()
+	return u.String(), nil
 }
 
-// GetRouterSvcUrl retrieves the URL of the Druid router service.
-// Parameters:
-//
-//	namespace: The namespace of the Druid cluster.
-//	druidClusterName: The name of the Druid cluster.
-//	c: The Kubernetes client.
-//
-// Returns:
-//
-//	string: The URL of the Druid router service.
-func GetRouterSvcUrl(namespace, druidClusterName string, c client.Client) (string, error) {
+// GetRouterSvcUrl returns the URL of the Druid router service.
+func GetRouterSvcUrl(ctx context.Context, namespace, druidClusterName string, c client.Client) (string, error) {
+	return getComponentSvcURL(ctx, namespace, druidClusterName, "router", c)
+}
+
+// GetBrokerSvcUrl returns the URL of the Druid broker service.
+func GetBrokerSvcUrl(ctx context.Context, namespace, druidClusterName string, c client.Client) (string, error) {
+	return getComponentSvcURL(ctx, namespace, druidClusterName, "broker", c)
+}
+
+func getComponentSvcURL(ctx context.Context, namespace, druidClusterName, component string, c client.Client) (string, error) {
 	listOpts := []client.ListOption{
 		client.InNamespace(namespace),
 		client.MatchingLabels(map[string]string{
 			"druid_cr":  druidClusterName,
-			"component": "router",
+			"component": component,
 		}),
 	}
 	svcList := &v1.ServiceList{}
-	if err := c.List(context.Background(), svcList, listOpts...); err != nil {
+	if err := c.List(ctx, svcList, listOpts...); err != nil {
 		return "", err
 	}
-	var svcName string
-
-	for range svcList.Items {
-		svcName = svcList.Items[0].Name
+	if len(svcList.Items) == 0 {
+		return "", fmt.Errorf("%s svc discovery fail", component)
 	}
 
-	if svcName == "" {
-		return "", errors.New("router svc discovery fail")
-	}
-
+	svcName := svcList.Items[0].Name
 	newName := "http://" + svcName + "." + namespace + ":" + DruidRouterPort
 
 	return newName, nil
+}
+
+type sqlQueryRequest struct {
+	Query string `json:"query"`
+}
+
+type sqlServerBuildRevision struct {
+	BuildRevision string `json:"build_revision"`
+}
+
+const (
+	buildRevisionSQLQuery = "SELECT DISTINCT(build_revision) AS build_revision FROM sys.servers"
+	versionSQLQuery       = "SELECT DISTINCT(version) AS build_revision FROM sys.servers"
+)
+
+func GetClusterBuildRevisions(
+	ctx context.Context,
+	c client.Client,
+	namespace, druidClusterName string,
+	auth Auth,
+) ([]string, error) {
+	return getClusterBuildRevisionsWithDeps(
+		ctx,
+		c,
+		namespace,
+		druidClusterName,
+		auth,
+		defaultBuildRevisionLookupDependencies(),
+	)
+}
+
+// GetClusterBuildRevisions returns the unique build revisions reported by live Druid servers.
+func getClusterBuildRevisionsWithDeps(
+	ctx context.Context,
+	c client.Client,
+	namespace, druidClusterName string,
+	auth Auth,
+	deps buildRevisionLookupDependencies,
+) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	basicAuth, err := GetAuthCreds(ctx, c, auth)
+	if err != nil {
+		return nil, err
+	}
+
+	httpClient := deps.newHTTPClient(&internalhttp.Auth{BasicAuth: basicAuth})
+
+	svcURL, resolveErr := deps.resolveQueryServiceURL(ctx, namespace, druidClusterName, c)
+	if resolveErr != nil {
+		return nil, &BuildRevisionLookupPendingError{
+			Reason: BuildRevisionPendingQueryServiceDiscovery,
+			Err:    resolveErr,
+		}
+	}
+
+	sqlPath, pathErr := MakeSQLPath(svcURL)
+	if pathErr != nil {
+		return nil, pathErr
+	}
+
+	rows, err := executeBuildRevisionQuery(ctx, httpClient, sqlPath, buildRevisionSQLQuery)
+	if err == nil {
+		return normalizeBuildRevisions(rows), nil
+	}
+	if !isMissingBuildRevisionColumnError(err) {
+		return nil, err
+	}
+
+	logger.Info(
+		"Falling back to sys.servers.version for deployment lifecycle build verification because sys.servers.build_revision is unavailable",
+		"namespace", namespace,
+		"druidInstance", druidClusterName,
+	)
+
+	rows, err = executeBuildRevisionQuery(ctx, httpClient, sqlPath, versionSQLQuery)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeBuildRevisions(rows), nil
+}
+
+func MakeSQLPath(baseURL string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse Druid SQL base URL %q: %w", baseURL, err)
+	}
+
+	u.Path = path.Join("druid", "v2", "sql")
+	return u.String(), nil
+}
+
+func normalizeBuildRevisions(rows []sqlServerBuildRevision) []string {
+	set := make(map[string]struct{})
+	for _, row := range rows {
+		trimmed := strings.TrimSpace(row.BuildRevision)
+		if trimmed == "" {
+			continue
+		}
+		set[trimmed] = struct{}{}
+	}
+
+	revisions := make([]string, 0, len(set))
+	for revision := range set {
+		revisions = append(revisions, revision)
+	}
+	sort.Strings(revisions)
+	return revisions
+}
+
+func executeBuildRevisionQuery(
+	ctx context.Context,
+	httpClient internalhttp.DruidHTTP,
+	sqlPath, query string,
+) ([]sqlServerBuildRevision, error) {
+	requestBody, err := json.Marshal(sqlQueryRequest{Query: query})
+	if err != nil {
+		return nil, err
+	}
+
+	response, requestErr := httpClient.Do(ctx, "POST", sqlPath, requestBody)
+	if requestErr != nil {
+		if isRetryableBuildRevisionRequestError(requestErr) {
+			return nil, &BuildRevisionLookupPendingError{
+				Reason: BuildRevisionPendingQueryEndpoint,
+				Err:    requestErr,
+			}
+		}
+		return nil, requestErr
+	}
+
+	if response.StatusCode != http.StatusOK {
+		err := fmt.Errorf("status code: %d, response body: %s", response.StatusCode, response.ResponseBody)
+		if isRetryableBuildRevisionStatus(response.StatusCode) {
+			return nil, &BuildRevisionLookupPendingError{
+				Reason: BuildRevisionPendingQueryResponse,
+				Err:    err,
+			}
+		}
+		return nil, err
+	}
+
+	var rows []sqlServerBuildRevision
+	if err := json.Unmarshal([]byte(response.ResponseBody), &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func isMissingBuildRevisionColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "build_revision") && strings.Contains(message, "not found")
+}
+
+func isRetryableBuildRevisionRequestError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+func isRetryableBuildRevisionStatus(statusCode int) bool {
+	return statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout
 }

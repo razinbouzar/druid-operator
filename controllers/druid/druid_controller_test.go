@@ -25,12 +25,14 @@ import (
 	druidv1alpha1 "github.com/apache/druid-operator/apis/druid/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	dto "github.com/prometheus/client_model/go"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalev2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 // +kubebuilder:docs-gen:collapse=Imports
@@ -128,6 +130,42 @@ var _ = Describe("Druid Operator", func() {
 
 		})
 
+		It("records lifecycle metrics during real reconcile", func() {
+			lifecycleDruidCR, err := readDruidClusterSpecFromFile(filePath)
+			Expect(err).Should(BeNil())
+
+			lifecycleDruidCR.Name = fmt.Sprintf("lifecycle-metrics-%d", GinkgoRandomSeed())
+			baseline, err := currentGlobalMetricValue("druid_operator_deployment_lifecycle_transitions_total", map[string]string{
+				"namespace":      lifecycleDruidCR.Namespace,
+				"druid_instance": lifecycleDruidCR.Name,
+				"phase":          "pending",
+				"trigger":        "spec_change",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Create(ctx, lifecycleDruidCR)).To(Succeed())
+
+			lifecycleStatus := &druidv1alpha1.Druid{}
+			Eventually(func() string {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: lifecycleDruidCR.Name, Namespace: lifecycleDruidCR.Namespace}, lifecycleStatus)
+				if err != nil {
+					return ""
+				}
+				return string(lifecycleStatus.Status.DeploymentLifecycle.Phase)
+			}, timeout, interval).Should(Equal(string(druidv1alpha1.DeploymentLifecycleInProgress)))
+
+			Eventually(func() float64 {
+				value, metricErr := currentGlobalMetricValue("druid_operator_deployment_lifecycle_transitions_total", map[string]string{
+					"namespace":      lifecycleDruidCR.Namespace,
+					"druid_instance": lifecycleDruidCR.Name,
+					"phase":          "pending",
+					"trigger":        "spec_change",
+				})
+				Expect(metricErr).NotTo(HaveOccurred())
+				return value
+			}, timeout, interval).Should(BeNumerically(">", baseline))
+		})
+
 		It("Test broker deployment", func() {
 			componentName := "brokers"
 			createdDeploy := &appsv1.Deployment{}
@@ -151,6 +189,7 @@ var _ = Describe("Druid Operator", func() {
 
 			By("By updating broker deployment replicas")
 			replicaCount := 2
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: druidCR.Name, Namespace: druidCR.Namespace}, druid)).To(Succeed())
 			if druidRep, ok := druid.Spec.Nodes[componentName]; ok {
 				druidRep.Replicas = int32(replicaCount)
 				druid.Spec.Nodes[componentName] = druidRep
@@ -190,6 +229,7 @@ var _ = Describe("Druid Operator", func() {
 
 				By(fmt.Sprintf("By updating statefulset replicas %s ", stsName))
 				replicaCount := 2
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: druidCR.Name, Namespace: druidCR.Namespace}, druid)).To(Succeed())
 				if druidRep, ok := druid.Spec.Nodes[componentName]; ok {
 					druidRep.Replicas = int32(replicaCount)
 					druid.Spec.Nodes[componentName] = druidRep
@@ -335,6 +375,52 @@ var _ = Describe("Druid Operator", func() {
 
 	})
 })
+
+func currentGlobalMetricValue(name string, labels map[string]string) (float64, error) {
+	families, err := ctrlmetrics.Registry.Gather()
+	if err != nil {
+		return 0, err
+	}
+	return gatherMetricValue(families, name, labels), nil
+}
+
+func gatherMetricValue(families []*dto.MetricFamily, name string, labels map[string]string) float64 {
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if !metricHasLabels(metric, labels) {
+				continue
+			}
+			if metric.Counter != nil {
+				return metric.Counter.GetValue()
+			}
+			if metric.Gauge != nil {
+				return metric.Gauge.GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
+	if len(labels) == 0 {
+		return true
+	}
+	matched := 0
+	for _, label := range metric.Label {
+		expected, ok := labels[label.GetName()]
+		if !ok {
+			continue
+		}
+		if label.GetValue() != expected {
+			return false
+		}
+		matched++
+	}
+	return matched == len(labels)
+}
 
 func areStringArraysEqual(a1, a2 []string) bool {
 	if len(a1) == len(a2) {

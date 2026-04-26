@@ -59,9 +59,9 @@ var logger = logf.Log.WithName("druid_operator_handler")
 func deployDruidCluster(ctx context.Context, sdk client.Client, m *v1alpha1.Druid, emitEvents EventEmitter) error {
 
 	if err := verifyDruidSpec(m); err != nil {
-		e := fmt.Errorf("invalid DruidSpec[%s:%s] due to [%s]", m.Kind, m.Name, err.Error())
+		e := markTerminalDeploymentLifecycleError(fmt.Errorf("invalid DruidSpec[%s:%s] due to [%s]", m.Kind, m.Name, err.Error()))
 		emitEvents.EmitEventGeneric(m, "DruidOperatorInvalidSpec", "", e)
-		return nil
+		return e
 	}
 
 	allNodeSpecs := getNodeSpecsByOrder(m)
@@ -575,49 +575,48 @@ func execCheckCrashStatus(ctx context.Context, sdk client.Client, nodeSpec *v1al
 }
 
 func checkCrashStatus(ctx context.Context, sdk client.Client, nodeSpec *v1alpha1.DruidNodeSpec, drd *v1alpha1.Druid, nodeSpecUniqueStr string, emitEvents EventEmitter) error {
+	return checkCrashStatusWithMetrics(ctx, sdk, nodeSpec, drd, nodeSpecUniqueStr, emitEvents, defaultDruidRolloutMetrics)
+}
 
-	podList, err := readers.List(ctx, sdk, drd, makeLabelsForNodeSpec(nodeSpec, drd, drd.Name, nodeSpecUniqueStr), emitEvents, func() objectList { return &v1.PodList{} }, func(listObj runtime.Object) []object {
-		items := listObj.(*v1.PodList).Items
-		result := make([]object, len(items))
-		for i := 0; i < len(items); i++ {
-			result[i] = &items[i]
-		}
-		return result
-	})
+func checkCrashStatusWithMetrics(ctx context.Context, sdk client.Client, nodeSpec *v1alpha1.DruidNodeSpec, drd *v1alpha1.Druid, nodeSpecUniqueStr string, emitEvents EventEmitter, metrics *druidRolloutMetrics) error {
+	podList, err := listNodePods(ctx, sdk, nodeSpec, drd, nodeSpecUniqueStr)
 	if err != nil {
 		return err
 	}
 
-	// the below condition evalutes if a pod is in
-	// 1. failed state 2. unknown state
-	// OR condtion.status is false which evalutes if neither of these conditions are met
-	// 1. ContainersReady 2. PodInitialized 3. PodReady 4. PodScheduled
-	for _, p := range podList {
-		if p.(*v1.Pod).Status.Phase == v1.PodFailed || p.(*v1.Pod).Status.Phase == v1.PodUnknown {
-			err := writers.Delete(ctx, sdk, drd, p, emitEvents, &client.DeleteOptions{})
-			if err != nil {
-				return err
-			}
-			msg := fmt.Sprintf("Deleted pod [%s] in namespace [%s], since it was in [%s] state.", p.GetName(), p.GetNamespace(), p.(*v1.Pod).Status.Phase)
-			logger.Info(msg, "Object", stringifyForLogging(p, drd), "name", drd.Name, "namespace", drd.Namespace)
-		} else {
-			for _, condition := range p.(*v1.Pod).Status.Conditions {
-				if condition.Type == v1.ContainersReady {
-					if condition.Status == v1.ConditionFalse {
-						for _, containerStatus := range p.(*v1.Pod).Status.ContainerStatuses {
-							if containerStatus.RestartCount > 1 {
-								err := writers.Delete(ctx, sdk, drd, p, emitEvents, &client.DeleteOptions{})
-								if err != nil {
-									return err
-								}
-								msg := fmt.Sprintf("Deleted pod [%s] in namespace [%s], since the container [%s] was crashlooping.", p.GetName(), p.GetNamespace(), containerStatus.Name)
-								logger.Info(msg, "Object", stringifyForLogging(p, drd), "name", drd.Name, "namespace", drd.Namespace)
-							}
-						}
-					}
-				}
-			}
+	candidates := findForceDeleteCandidates(podList)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	podsByName := map[string]object{}
+	for _, pod := range podList {
+		podsByName[pod.GetName()] = pod
+	}
+
+	for _, candidate := range candidates {
+		pod := podsByName[candidate.podName]
+		if pod == nil {
+			continue
 		}
+
+		err := writers.Delete(ctx, sdk, drd, pod, emitEvents, &client.DeleteOptions{})
+		if err != nil {
+			return err
+		}
+
+		if metrics != nil {
+			metrics.recordForceDeleteAction(drd.Namespace, drd.Name, nodeSpecUniqueStr, nodeSpec.NodeType, candidate.reason)
+		}
+
+		if candidate.reason == "pod_phase" {
+			msg := fmt.Sprintf("Deleted pod [%s] in namespace [%s], since it was in [%s] state.", pod.GetName(), pod.GetNamespace(), pod.(*v1.Pod).Status.Phase)
+			logger.Info(msg, "Object", stringifyForLogging(pod, drd), "name", drd.Name, "namespace", drd.Namespace)
+			continue
+		}
+
+		msg := fmt.Sprintf("Deleted pod [%s] in namespace [%s], since the container [%s] was crashlooping.", pod.GetName(), pod.GetNamespace(), candidate.containerName)
+		logger.Info(msg, "Object", stringifyForLogging(pod, drd), "name", drd.Name, "namespace", drd.Namespace)
 	}
 
 	return nil
@@ -738,7 +737,7 @@ func isObjFullyDeployed(ctx context.Context, sdk client.Client, nodeSpec v1alpha
 		for _, condition := range obj.(*appsv1.Deployment).Status.Conditions {
 			// This detects a failure condition, operator should send a rolling deployment failed event
 			if condition.Type == appsv1.DeploymentReplicaFailure {
-				return false, errors.New(condition.Reason)
+				return false, markTerminalDeploymentLifecycleError(errors.New(condition.Reason))
 			} else if condition.Type == appsv1.DeploymentProgressing && condition.Status != v1.ConditionTrue || obj.(*appsv1.Deployment).Status.ReadyReplicas != obj.(*appsv1.Deployment).Status.Replicas {
 				return false, nil
 			} else {
@@ -941,8 +940,11 @@ func getVolume(nodeSpec *v1alpha1.DruidNodeSpec, m *v1alpha1.Druid, nodeSpecUniq
 
 func getEnv(nodeSpec *v1alpha1.DruidNodeSpec, m *v1alpha1.Druid, configMapSHA string) []v1.EnvVar {
 	envHolder := firstNonNilValue(nodeSpec.Env, m.Spec.Env).([]v1.EnvVar)
-	// enables to do the trick to force redeployment in case of configmap changes.
+	// These values intentionally change the pod template when config or rollout inputs change.
 	envHolder = append(envHolder, v1.EnvVar{Name: "configMapSHA", Value: configMapSHA})
+	if m.Spec.ForceRedeployToken != "" {
+		envHolder = append(envHolder, v1.EnvVar{Name: "forceRedeployToken", Value: m.Spec.ForceRedeployToken})
+	}
 
 	return envHolder
 }

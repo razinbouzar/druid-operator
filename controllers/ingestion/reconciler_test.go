@@ -19,6 +19,7 @@ under the License.
 package ingestion
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -179,7 +180,7 @@ func TestUpdateCompaction_Success(t *testing.T) {
 	r := &DruidIngestionReconciler{}
 
 	// Call UpdateCompaction
-	success, err := r.UpdateCompaction(di, server.URL, auth)
+	success, err := r.UpdateCompaction(context.Background(), di, server.URL, auth)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -226,7 +227,7 @@ func TestUpdateCompaction_Failure(t *testing.T) {
 	r := &DruidIngestionReconciler{}
 
 	// Call UpdateCompaction
-	success, err := r.UpdateCompaction(di, server.URL, auth)
+	success, err := r.UpdateCompaction(context.Background(), di, server.URL, auth)
 
 	if err == nil {
 		t.Fatalf("expected error, got nil")
@@ -469,10 +470,13 @@ func TestGetPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actual := getPath(tt.ingestionType, tt.svcName, tt.httpMethod, tt.taskId, tt.shutDownTask)
-			if actual != tt.expected {
-				t.Errorf("getPath() = %v, expected %v", actual, tt.expected)
+			actual, err := getPath(tt.ingestionType, tt.svcName, tt.httpMethod, tt.taskId, tt.shutDownTask)
+			if tt.expected == "" {
+				assert.Error(t, err)
+				return
 			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected, actual)
 		})
 	}
 }

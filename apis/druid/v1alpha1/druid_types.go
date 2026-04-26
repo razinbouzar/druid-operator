@@ -160,6 +160,18 @@ type DruidSpec struct {
 	// +kubebuilder:default:="IfNotPresent"
 	ImagePullPolicy v1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
+	// ForceRedeployToken forces a rollout when changed, even if the image tag is unchanged.
+	// This is primarily intended for mutable-tag redeploys driven by external automation.
+	// +optional
+	ForceRedeployToken string `json:"forceRedeployToken,omitempty"`
+
+	// ExpectedBuildRevision is the Druid runtime build identifier that must be observed
+	// across live servers before a deployment lifecycle is considered complete.
+	// The operator verifies this against sys.servers.build_revision when available and
+	// falls back to sys.servers.version for Druid versions that do not expose build_revision.
+	// +optional
+	ExpectedBuildRevision string `json:"expectedBuildRevision,omitempty"`
+
 	// Env Environment variables for druid containers.
 	// +optional
 	Env []v1.EnvVar `json:"env,omitempty"`
@@ -570,20 +582,56 @@ type DruidNodeTypeStatus struct {
 	Reason                   string                 `json:"reason,omitempty"`
 }
 
+type DeploymentLifecyclePhase string
+
+const (
+	DeploymentLifecyclePending    DeploymentLifecyclePhase = "Pending"
+	DeploymentLifecycleInProgress DeploymentLifecyclePhase = "InProgress"
+	DeploymentLifecycleSucceeded  DeploymentLifecyclePhase = "Succeeded"
+	DeploymentLifecycleFailed     DeploymentLifecyclePhase = "Failed"
+)
+
+type DeploymentLifecycleTrigger string
+
+const (
+	DeploymentTriggerSpecChange    DeploymentLifecycleTrigger = "SpecChange"
+	DeploymentTriggerImageChange   DeploymentLifecycleTrigger = "ImageChange"
+	DeploymentTriggerManualRollout DeploymentLifecycleTrigger = "ManualRollout"
+)
+
+type DeploymentLifecycleStatus struct {
+	Revision string `json:"revision,omitempty"`
+	// +kubebuilder:validation:Enum=Pending;InProgress;Succeeded;Failed
+	Phase              DeploymentLifecyclePhase `json:"phase,omitempty"`
+	Reason             string                   `json:"reason,omitempty"`
+	ObservedGeneration int64                    `json:"observedGeneration,omitempty"`
+	StartedAt          *metav1.Time             `json:"startedAt,omitempty"`
+	CompletedAt        *metav1.Time             `json:"completedAt,omitempty"`
+
+	LastSuccessfulImage              string `json:"lastSuccessfulImage,omitempty"`
+	LastSuccessfulImageInputsHash    string `json:"lastSuccessfulImageInputsHash,omitempty"`
+	LastSuccessfulForceRedeployToken string `json:"lastSuccessfulForceRedeployToken,omitempty"`
+
+	// +kubebuilder:validation:Enum=SpecChange;ImageChange;ManualRollout
+	Trigger DeploymentLifecycleTrigger `json:"trigger,omitempty"`
+
+	ExpectedBuildRevision  string   `json:"expectedBuildRevision,omitempty"`
+	ObservedBuildRevisions []string `json:"observedBuildRevisions,omitempty"`
+}
+
 // DruidClusterStatus Defines the observed state of Druid.
 type DruidClusterStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	DruidNodeStatus        DruidNodeTypeStatus `json:"druidNodeStatus,omitempty"`
-	StatefulSets           []string            `json:"statefulSets,omitempty"`
-	Deployments            []string            `json:"deployments,omitempty"`
-	Services               []string            `json:"services,omitempty"`
-	ConfigMaps             []string            `json:"configMaps,omitempty"`
-	PodDisruptionBudgets   []string            `json:"podDisruptionBudgets,omitempty"`
-	Ingress                []string            `json:"ingress,omitempty"`
-	HPAutoScalers          []string            `json:"hpAutoscalers,omitempty"`
-	Pods                   []string            `json:"pods,omitempty"`
-	PersistentVolumeClaims []string            `json:"persistentVolumeClaims,omitempty"`
+	DeploymentLifecycle    DeploymentLifecycleStatus `json:"deploymentLifecycle,omitempty"`
+	DruidNodeStatus        DruidNodeTypeStatus       `json:"druidNodeStatus,omitempty"`
+	StatefulSets           []string                  `json:"statefulSets,omitempty"`
+	Deployments            []string                  `json:"deployments,omitempty"`
+	Services               []string                  `json:"services,omitempty"`
+	ConfigMaps             []string                  `json:"configMaps,omitempty"`
+	PodDisruptionBudgets   []string                  `json:"podDisruptionBudgets,omitempty"`
+	Ingress                []string                  `json:"ingress,omitempty"`
+	HPAutoScalers          []string                  `json:"hpAutoscalers,omitempty"`
+	Pods                   []string                  `json:"pods,omitempty"`
+	PersistentVolumeClaims []string                  `json:"persistentVolumeClaims,omitempty"`
 }
 
 // Druid is the Schema for the druids API.

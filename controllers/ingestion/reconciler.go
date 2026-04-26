@@ -63,12 +63,12 @@ func (r *DruidIngestionReconciler) do(ctx context.Context, di *v1alpha1.DruidIng
 		return err
 	}
 
-	svcName, err := druidapi.GetRouterSvcUrl(di.Namespace, di.Spec.DruidClusterName, r.Client)
+	svcName, err := druidapi.GetRouterSvcUrl(ctx, di.Namespace, di.Spec.DruidClusterName, r.Client)
 	if err != nil {
 		return err
 	}
 
-	_, err = r.CreateOrUpdate(di, svcName, internalhttp.Auth{BasicAuth: basicAuth})
+	_, err = r.CreateOrUpdate(ctx, di, svcName, internalhttp.Auth{BasicAuth: basicAuth})
 	if err != nil {
 		return err
 	}
@@ -80,13 +80,13 @@ func (r *DruidIngestionReconciler) do(ctx context.Context, di *v1alpha1.DruidIng
 		if !controllerutil.ContainsFinalizer(di, DruidIngestionControllerFinalizer) {
 			controllerutil.AddFinalizer(di, DruidIngestionControllerFinalizer)
 			if err := r.Update(ctx, di.DeepCopyObject().(*v1alpha1.DruidIngestion)); err != nil {
-				return nil
+				return err
 			}
 		}
 	} else {
 		if controllerutil.ContainsFinalizer(di, DruidIngestionControllerFinalizer) {
 			// our finalizer is present, so lets handle any external dependency
-			svcName, err := druidapi.GetRouterSvcUrl(di.Namespace, di.Spec.DruidClusterName, r.Client)
+			svcName, err := druidapi.GetRouterSvcUrl(ctx, di.Namespace, di.Spec.DruidClusterName, r.Client)
 			if err != nil {
 				return err
 			}
@@ -96,9 +96,15 @@ func (r *DruidIngestionReconciler) do(ctx context.Context, di *v1alpha1.DruidIng
 				&internalhttp.Auth{BasicAuth: basicAuth},
 			)
 
+			shutdownPath, err := getPath(di.Spec.Ingestion.Type, svcName, http.MethodPost, di.Status.TaskId, true)
+			if err != nil {
+				return err
+			}
+
 			respShutDownTask, err := posthttp.Do(
+				ctx,
 				http.MethodPost,
-				getPath(di.Spec.Ingestion.Type, svcName, http.MethodPost, di.Status.TaskId, true),
+				shutdownPath,
 				[]byte{},
 			)
 			if err != nil {
@@ -123,7 +129,7 @@ func (r *DruidIngestionReconciler) do(ctx context.Context, di *v1alpha1.DruidIng
 			// remove our finalizer from the list and update it.
 			controllerutil.RemoveFinalizer(di, DruidIngestionControllerFinalizer)
 			if err := r.Update(ctx, di.DeepCopyObject().(*v1alpha1.DruidIngestion)); err != nil {
-				return nil
+				return err
 			}
 		}
 	}
@@ -242,6 +248,7 @@ func getCompactionJson(di *v1alpha1.DruidIngestion) (string, error) {
 
 // UpdateCompaction updates the compaction settings for a Druid data source.
 func (r *DruidIngestionReconciler) UpdateCompaction(
+	ctx context.Context,
 	di *v1alpha1.DruidIngestion,
 	svcName string,
 	auth internalhttp.Auth,
@@ -261,10 +268,16 @@ func (r *DruidIngestionReconciler) UpdateCompaction(
 		return false, err
 	}
 
+	currentCompactionPath, err := druidapi.MakePath(svcName, "coordinator", "config", "compaction", dataSource)
+	if err != nil {
+		return false, err
+	}
+
 	// Get current compaction settings
 	currentResp, err := httpClient.Do(
+		ctx,
 		http.MethodGet,
-		druidapi.MakePath(svcName, "coordinator", "config", "compaction", dataSource),
+		currentCompactionPath,
 		nil,
 	)
 	if err != nil {
@@ -294,10 +307,16 @@ func (r *DruidIngestionReconciler) UpdateCompaction(
 		return false, nil
 	}
 
+	updateCompactionPath, err := druidapi.MakePath(svcName, "coordinator", "config", "compaction")
+	if err != nil {
+		return false, err
+	}
+
 	// Update compaction settings
 	respUpdateCompaction, err := httpClient.Do(
+		ctx,
 		http.MethodPost,
-		druidapi.MakePath(svcName, "coordinator", "config", "compaction"),
+		updateCompactionPath,
 		[]byte(desiredCompactionJson),
 	)
 	if err != nil {
@@ -315,6 +334,7 @@ func (r *DruidIngestionReconciler) UpdateCompaction(
 
 // UpdateRules updates the rules for a Druid data source.
 func (r *DruidIngestionReconciler) UpdateRules(
+	ctx context.Context,
 	di *v1alpha1.DruidIngestion,
 	svcName string,
 	auth internalhttp.Auth,
@@ -338,10 +358,16 @@ func (r *DruidIngestionReconciler) UpdateRules(
 		return false, err
 	}
 
+	rulesPath, err := druidapi.MakePath(svcName, "coordinator", "rules", dataSource)
+	if err != nil {
+		return false, err
+	}
+
 	// Update rules
 	respUpdateRules, err := postHttp.Do(
+		ctx,
 		http.MethodPost,
-		druidapi.MakePath(svcName, "coordinator", "rules", dataSource),
+		rulesPath,
 		[]byte(rulesData),
 	)
 
@@ -357,6 +383,7 @@ func (r *DruidIngestionReconciler) UpdateRules(
 }
 
 func (r *DruidIngestionReconciler) CreateOrUpdate(
+	ctx context.Context,
 	di *v1alpha1.DruidIngestion,
 	svcName string,
 	auth internalhttp.Auth,
@@ -376,10 +403,16 @@ func (r *DruidIngestionReconciler) CreateOrUpdate(
 			&auth,
 		)
 
+		createPath, err := getPath(di.Spec.Ingestion.Type, svcName, http.MethodPost, "", false)
+		if err != nil {
+			return controllerutil.OperationResultNone, err
+		}
+
 		// Create ingestion task
 		respCreateTask, err := postHttp.Do(
+			ctx,
 			http.MethodPost,
-			getPath(di.Spec.Ingestion.Type, svcName, http.MethodPost, "", false),
+			createPath,
 			[]byte(specJson),
 		)
 
@@ -387,12 +420,12 @@ func (r *DruidIngestionReconciler) CreateOrUpdate(
 			return controllerutil.OperationResultNone, err
 		}
 
-		compactionOk, err := r.UpdateCompaction(di, svcName, auth)
+		compactionOk, err := r.UpdateCompaction(ctx, di, svcName, auth)
 		if err != nil {
 			return controllerutil.OperationResultNone, err
 		}
 
-		rulesOk, err := r.UpdateRules(di, svcName, auth)
+		rulesOk, err := r.UpdateRules(ctx, di, svcName, auth)
 		if err != nil {
 			return controllerutil.OperationResultNone, err
 		}
@@ -469,9 +502,15 @@ func (r *DruidIngestionReconciler) CreateOrUpdate(
 				&auth,
 			)
 
+			updatePath, err := getPath(di.Spec.Ingestion.Type, svcName, http.MethodPost, "", false)
+			if err != nil {
+				return controllerutil.OperationResultNone, err
+			}
+
 			respUpdateSpec, err := postHttp.Do(
+				ctx,
 				http.MethodPost,
-				getPath(di.Spec.Ingestion.Type, svcName, http.MethodPost, "", false),
+				updatePath,
 				[]byte(specJson),
 			)
 			if err != nil {
@@ -510,7 +549,7 @@ func (r *DruidIngestionReconciler) CreateOrUpdate(
 
 		}
 
-		compactionOk, err := r.UpdateCompaction(di, svcName, auth)
+		compactionOk, err := r.UpdateCompaction(ctx, di, svcName, auth)
 		if err != nil {
 			return controllerutil.OperationResultNone, err
 		}
@@ -540,7 +579,7 @@ func (r *DruidIngestionReconciler) CreateOrUpdate(
 		rulesEqual := reflect.DeepEqual(di.Status.CurrentRules, di.Spec.Ingestion.Rules)
 
 		if !rulesEqual {
-			rulesOk, err := r.UpdateRules(di, svcName, auth)
+			rulesOk, err := r.UpdateRules(ctx, di, svcName, auth)
 			if err != nil {
 				return controllerutil.OperationResultNone, err
 			}
@@ -610,7 +649,7 @@ func (r *DruidIngestionReconciler) makePatchDruidIngestionStatus(
 func getPath(
 	ingestionType v1alpha1.DruidIngestionMethod,
 	svcName, httpMethod, taskId string,
-	shutDownTask bool) string {
+	shutDownTask bool) (string, error) {
 
 	switch ingestionType {
 	case v1alpha1.NativeBatchIndexParallel:
@@ -639,10 +678,10 @@ func getPath(
 	case v1alpha1.Kinesis:
 	case v1alpha1.QueryControllerSQL:
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported ingestion type %q", ingestionType)
 	}
 
-	return ""
+	return "", fmt.Errorf("unsupported request for ingestion type %q with method %q", ingestionType, httpMethod)
 }
 
 type taskHolder struct {

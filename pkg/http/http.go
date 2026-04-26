@@ -20,16 +20,15 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 )
 
-// DruidHTTP interface
 type DruidHTTP interface {
-	Do(method, url string, body []byte) (*Response, error)
+	Do(ctx context.Context, method, url string, body []byte) (*Response, error)
 }
 
-// HTTP client
 type DruidClient struct {
 	HTTPClient *http.Client
 	Auth       *Auth
@@ -50,22 +49,20 @@ type Auth struct {
 	BasicAuth BasicAuth
 }
 
-// BasicAuth
 type BasicAuth struct {
 	UserName string
 	Password string
 }
 
-// Response passed to controller
 type Response struct {
 	ResponseBody string
 	StatusCode   int
 }
 
-// Do method to be used schema and tenant controller.
-func (c *DruidClient) Do(Method, url string, body []byte) (*Response, error) {
+// Do issues a context-aware JSON request to a Druid control-plane endpoint.
+func (c *DruidClient) Do(ctx context.Context, method, url string, body []byte) (*Response, error) {
 
-	req, err := http.NewRequest(Method, url, bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, err
 	}

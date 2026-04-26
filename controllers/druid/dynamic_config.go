@@ -49,7 +49,7 @@ func updateDruidDynamicConfigs(
 
 		dynamicConfig := nodeConfig.DynamicConfig.Raw
 
-		svcName, err := druidapi.GetRouterSvcUrl(druid.Namespace, druid.Name, client)
+		svcName, err := druidapi.GetRouterSvcUrl(ctx, druid.Namespace, druid.Name, client)
 		if err != nil {
 			emitEvent.EmitEventGeneric(
 				druid,
@@ -85,15 +85,19 @@ func updateDruidDynamicConfigs(
 		var dynamicConfigPath string
 		switch nodeType {
 		case "middlemanagers":
-			dynamicConfigPath = druidapi.MakePath(svcName, "indexer", "worker")
+			dynamicConfigPath, err = druidapi.MakePath(svcName, "indexer", "worker")
 		case "coordinators":
-			dynamicConfigPath = druidapi.MakePath(svcName, "coordinator", "config")
+			dynamicConfigPath, err = druidapi.MakePath(svcName, "coordinator", "config")
 		default:
 			return fmt.Errorf("unsupported node type: %s", nodeType)
+		}
+		if err != nil {
+			return err
 		}
 
 		// Fetch current dynamic configurations
 		currentResp, err := httpClient.Do(
+			ctx,
 			http.MethodGet,
 			dynamicConfigPath,
 			nil,
@@ -147,6 +151,7 @@ func updateDruidDynamicConfigs(
 
 		// Update the Druid cluster's dynamic configurations if needed
 		respDynamicConfigs, err := httpClient.Do(
+			ctx,
 			http.MethodPost,
 			dynamicConfigPath,
 			dynamicConfig,

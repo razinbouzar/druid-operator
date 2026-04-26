@@ -443,6 +443,30 @@ Kubernetes core/v1.PullPolicy
 </tr>
 <tr>
 <td>
+<code>forceRedeployToken</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ForceRedeployToken forces a rollout when changed, even if the image tag is unchanged. This is primarily intended for mutable-tag redeploys driven by external automation and is classified as a <code>ManualRollout</code> in <code>status.deploymentLifecycle.trigger</code>.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>expectedBuildRevision</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ExpectedBuildRevision is the Druid runtime build identifier that must be observed across live servers before an image or manual deployment lifecycle is considered complete. The operator verifies this against <code>sys.servers.build_revision</code> when available and falls back to <code>sys.servers.version</code> for Druid versions that do not expose <code>build_revision</code>. Changing this field alone does not create a new lifecycle revision; it updates the completion criteria for the current rollout.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>env</code><br>
 <em>
 <a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#envvar-v1-core">
@@ -964,6 +988,22 @@ DruidClusterStatus
 <tbody>
 <tr>
 <td>
+<code>deploymentLifecycle</code><br>
+<em>
+<a href="#druid.apache.org/v1alpha1.DeploymentLifecycleStatus">
+DeploymentLifecycleStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Pipeline-facing deployment lifecycle status for the current <code>Druid</code> rollout.</p>
+<p>Automation should treat <code>observedGeneration</code>, <code>revision</code>, and <code>phase</code> as the supported polling contract. Wait for <code>observedGeneration</code> to match the applied object generation, require a non-empty <code>revision</code>, then interpret <code>phase</code> as the rollout outcome.</p>
+<p>Treat <code>reason</code>, <code>expectedBuildRevision</code>, and <code>observedBuildRevisions</code> as diagnostics. <code>Failed</code> is reserved for terminal or configuration failures; transient reconcile errors may leave the lifecycle in a non-terminal phase. Kubernetes Events emitted by the operator are observability only and are not the supported automation API.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>druidNodeStatus</code><br>
 <em>
 <a href="#druid.apache.org/v1alpha1.DruidNodeTypeStatus">
@@ -1064,6 +1104,171 @@ Important: Run &ldquo;make&rdquo; to regenerate code after modifying this file</
 </em>
 </td>
 <td>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<h3 id="druid.apache.org/v1alpha1.DeploymentLifecycleStatus">DeploymentLifecycleStatus
+</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#druid.apache.org/v1alpha1.DruidClusterStatus">DruidClusterStatus</a>)
+</p>
+<p><code>DeploymentLifecycleStatus</code> describes the rollout currently tracked by the operator. Pipelines should use <code>observedGeneration</code> first and <code>revision</code> second when polling.</p>
+<div class="md-typeset__scrollwrap">
+<div class="md-typeset__table">
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>revision</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Identity of the currently tracked rollout. Pipelines should require a non-empty value before accepting terminal status.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>phase</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Current lifecycle phase. <code>Pending</code> and <code>InProgress</code> are non-terminal; <code>Succeeded</code> and <code>Failed</code> are terminal for the tracked revision.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>reason</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Human-readable lifecycle detail for operators and pipeline diagnostics.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>observedGeneration</code><br>
+<em>
+integer
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Freshness key for automation. Pipelines should wait for this value to match the applied object generation before trusting the lifecycle phase.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startedAt</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Timestamp for when the currently tracked rollout began.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>completedAt</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Timestamp for when the currently tracked rollout reached a terminal phase.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>trigger</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Cause classification for the tracked rollout: <code>SpecChange</code>, <code>ImageChange</code>, or <code>ManualRollout</code>.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>expectedBuildRevision</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Requested runtime build identifier for image and manual rollouts. If it is missing or mismatched, the lifecycle remains non-terminal until corrected or timed out by the pipeline. Verification uses <code>sys.servers.build_revision</code> when available and falls back to <code>sys.servers.version</code> on older Druid versions.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>observedBuildRevisions</code><br>
+<em>
+[]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Observed server build revisions during rollout verification. This is diagnostic data, not a primary polling key.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>lastSuccessfulImage</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Operator-maintained bookkeeping from the most recent successful rollout. Not a primary pipeline gating field.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>lastSuccessfulImageInputsHash</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Operator-maintained hash of the image inputs from the most recent successful rollout. Not a primary pipeline gating field.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>lastSuccessfulForceRedeployToken</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Operator-maintained manual rollout token from the most recent successful rollout. Not a primary pipeline gating field.</p>
 </td>
 </tr>
 </tbody>

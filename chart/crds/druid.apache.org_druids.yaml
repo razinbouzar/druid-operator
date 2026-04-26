@@ -1712,6 +1712,13 @@ spec:
                       x-kubernetes-map-type: atomic
                   type: object
                 type: array
+              expectedBuildRevision:
+                description: |-
+                  ExpectedBuildRevision is the Druid runtime build identifier that must be observed
+                  across live servers before a deployment lifecycle is considered complete.
+                  The operator verifies this against sys.servers.build_revision when available and
+                  falls back to sys.servers.version for Druid versions that do not expose build_revision.
+                type: string
               extraCommonConfig:
                 description: |-
                   ExtraCommonConfig References to ConfigMaps holding more configuration files to mount to the
@@ -1768,6 +1775,11 @@ spec:
                   issue: https://github.com/kubernetes/kubernetes/issues/67250
                   doc: https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#forced-rollback
                 type: boolean
+              forceRedeployToken:
+                description: |-
+                  ForceRedeployToken forces a rollout when changed, even if the image tag is unchanged.
+                  This is primarily intended for mutable-tag redeploys driven by external automation.
+                type: string
               hdfs-site.xml:
                 description: HdfsSite Contents of `hdfs-site.xml`.
                 type: string
@@ -11851,14 +11863,52 @@ spec:
                 items:
                   type: string
                 type: array
+              deploymentLifecycle:
+                properties:
+                  completedAt:
+                    format: date-time
+                    type: string
+                  expectedBuildRevision:
+                    type: string
+                  lastSuccessfulForceRedeployToken:
+                    type: string
+                  lastSuccessfulImage:
+                    type: string
+                  lastSuccessfulImageInputsHash:
+                    type: string
+                  observedBuildRevisions:
+                    items:
+                      type: string
+                    type: array
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  phase:
+                    enum:
+                    - Pending
+                    - InProgress
+                    - Succeeded
+                    - Failed
+                    type: string
+                  reason:
+                    type: string
+                  revision:
+                    type: string
+                  startedAt:
+                    format: date-time
+                    type: string
+                  trigger:
+                    enum:
+                    - SpecChange
+                    - ImageChange
+                    - ManualRollout
+                    type: string
+                type: object
               deployments:
                 items:
                   type: string
                 type: array
               druidNodeStatus:
-                description: |-
-                  INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-                  Important: Run "make" to regenerate code after modifying this file
                 properties:
                   druidNode:
                     type: string
